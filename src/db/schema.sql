@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS plans(
   account_id uuid,
   scope text NOT NULL CHECK (scope IN ('account','user')),
   name text NOT NULL,
-  monthly_allowance bigint NOT NULL CHECK(monthly_allownace >= 0),
+  monthly_allowance bigint NOT NULL CHECK(monthly_allowance >= 0),
   max_per_request bigint NOT NULL CHECK (max_per_request > 0),
   is_predefined boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -28,7 +28,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS plans_predefined_name
 -------------------
 
 CREATE TABLE IF NOT EXISTS account(
-  id uuid PRIMARY KEY DEFAULT get_random_uuid(),
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL,
   api_key_hash text NOT NULL,
   plan_id uuid NOT NULL UNIQUE,
