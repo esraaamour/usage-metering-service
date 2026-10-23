@@ -60,3 +60,27 @@ curl -X POST http://localhost:3000/api/users \
 curl -X POST http://localhost:3000/api/usage/consume \
   -H "Content-Type: application/json" -H "x-api-key: $KEY" \
   -d '{"userExternalId": "user_1", "units": 10,
+
+## Tests
+
+```bash
+docker compose up -d
+npm test
+```
+
+The suite covers API key validation, account isolation, user and account limits, idempotent retries, concurrent requests, and plan changes keeping consumed units. Month rollover is not covered by automated tests (it needs a controllable clock).
+
+## Load test
+
+```bash
+docker compose up -d
+./loadtest/run.sh
+```
+
+The script creates an account on the Pro plan with 10 Premium users, then sends POST `/api/usage/consume` with a unique `requestId` per request (20 connections, 10 seconds, autocannon). Requires `jq`.
+
+**Result (local machine, Docker on WSL2):** about 71 requests/second, median latency 270 ms, 99th percentile 885 ms, no errors.
+
+**Bottleneck:** every consume locks the account usage row inside a transaction, so requests for the same account are serialized. The test sends all load to one account, which is the worst case. Correctness is preserved (the concurrency test confirms exactly the allowed number of requests are accepted). Different accounts do not block each other, so throughput scales with the number of accounts.
+
+**Possible improvements:** shorten the transaction, batch usage updates, or shard the counter per account (at the cost of more complex limit checks).
