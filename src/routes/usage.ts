@@ -1,25 +1,31 @@
-import { FastifyInstance, FastifyRequest } from 'fastify';
+import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { pool } from '../db/db.js';
 import { authenticate } from '../db/auth.js';
+import { consume, ConsumeInput } from '../db/consume.js';
+import { HttpError } from '../db/errors.js';
 
 const toNum = (val: any): number => Number(val) || 0;
 
 export default async function usageRoutes(app: FastifyInstance) {
-  app.get('/usage', async (req: FastifyRequest) => {
+  // 1. GET /api/usage - Fetch account and user usage statistics
+  app.get('/', async (req: FastifyRequest) => {
     const { accountId } = await authenticate(req);
 
-    const monthResult = await pool.query(
-      `SELECT monthly_allowance, used FROM accounts WHERE id = $1`,
-      [accountId]
-    );
-
     const accountResult = await pool.query(
-      `SELECT monthly_allowance, used FROM accounts WHERE id = $1`,
+      `SELECT ap.monthly_allowance, COALESCE(au.used, 0) as used 
+       FROM accounts a
+       JOIN plans ap ON ap.id = a.plan_id
+       LEFT JOIN account_usage au ON au.account_id = a.id AND au.month = to_char(date_trunc('month', now() AT TIME ZONE 'utc'), 'YYYY-MM-DD')
+       WHERE a.id = $1`,
       [accountId]
     );
 
     const usersResult = await pool.query(
-      `SELECT id, monthly_allowance, used FROM users WHERE account_id = $1`,
+      `SELECT u.id, up.monthly_allowance, COALESCE(uu.used, 0) as used 
+       FROM users u
+       JOIN plans up ON up.id = u.plan_id
+       LEFT JOIN user_usage uu ON uu.user_id = u.id AND uu.month = to_char(date_trunc('month', now() AT TIME ZONE 'utc'), 'YYYY-MM-DD')
+       WHERE u.account_id = $1`,
       [accountId]
     );
 
@@ -34,5 +40,42 @@ export default async function usageRoutes(app: FastifyInstance) {
         currentPeriodConsumed: toNum(u.used),
       })),
     };
+  });
+
+  // 2. POST /api/usage/consume - Consume units for a specific user under the authenticated account
+  app.post('/consume', async (req: FastifyRequest<{ Body: { userExternalId: string; units: number; requestId: string } }>, reply: FastifyReply) => {
+    try {
+      const { accountId } = await authenticate(req);
+      const { userExternalId, units, requestId } = req.body || {};
+
+      if (!userExternalId || typeof units !== 'number' || !requestId) {
+        return reply.status(400).send({
+          statusCode: 400,
+          code: 'bad_request',
+          error: 'Bad Request',
+          message: 'Missing required fields: userExternalId, units, or requestId',
+        });
+      }
+
+      const input: ConsumeInput = {
+        accountId,
+        userExternalId,
+        units,
+        requestId,
+      };
+
+      const result = await consume(input);
+      return reply.send(result);
+    } catch (err: any) {
+      if (err instanceof HttpError) {
+        return reply.status(err.statusCode).send({
+          statusCode: err.statusCode,
+          code: err.code,
+          error: err.name,
+          message: err.message,
+        });
+      }
+      throw err;
+    }
   });
 }

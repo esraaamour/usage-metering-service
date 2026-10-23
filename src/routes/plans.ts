@@ -30,7 +30,7 @@ const duplicateName = (e: any) => {
 
 export default async function plansRoutes(app: FastifyInstance) {
   // Create a custom plan for the calling account.
-  app.post('/plans', async (req, reply) => {
+  app.post('/', async (req, reply) => {
     const { accountId } = await authenticate(req);
     const body = z
       .object({
@@ -53,7 +53,7 @@ export default async function plansRoutes(app: FastifyInstance) {
   });
 
   // List predefined plans + this account's own plans.
-  app.get('/plans', async (req) => {
+  app.get('/', async (req) => {
     const { accountId } = await authenticate(req);
     const { rows } = await pool.query(
       `SELECT ${COLS} FROM plans
@@ -65,7 +65,7 @@ export default async function plansRoutes(app: FastifyInstance) {
   });
 
   // Update a custom plan. Predefined = read-only. Other accounts' plans look non-existent.
-  app.patch('/plans/:id', async (req) => {
+  app.patch('/:id', async (req) => {
     const { accountId } = await authenticate(req);
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = z

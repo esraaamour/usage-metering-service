@@ -1,19 +1,44 @@
 import Fastify from 'fastify';
 import dotenv from 'dotenv';
+import { z } from 'zod';
 
-// Load environment variables from .env file
+import accountsRoutes from './routes/accounts.js';
+import usersRoutes from './routes/users.js';
+import plansRoutes from './routes/plans.js';
+import assignmentsRoutes from './routes/assignments.js';
+import usageRoutes from './routes/usage.js';
+import { HttpError } from './db/errors.js';
+
 dotenv.config();
 
-const server = Fastify({
-  logger: true,
+const server = Fastify({ logger: true });
+
+// Turn HttpError and validation errors into proper JSON responses (401, 404, 409, 400...).
+server.setErrorHandler((err, _req, reply) => {
+  const e = err as any;
+  if (err instanceof HttpError) {
+    const status = e.status ?? e.statusCode ?? 500;
+    return reply.status(status).send({ error: { code: e.code, message: err.message } });
+  }
+  if (err instanceof z.ZodError) {
+    return reply.status(400).send({
+      error: { code: 'validation_error', message: 'Invalid request', details: err.issues },
+    });
+  }
+  server.log.error(err);
+  return reply.status(e.statusCode ?? 500).send({
+    error: { code: 'internal', message: 'Internal error' },
+  });
 });
 
-// Default health check route to verify the server is running
-server.get('/', async (request, reply) => {
-  return { status: 'OK', message: 'Usage Metering Service is running!' };
-});
+server.get('/', async () => ({ status: 'OK', message: 'Usage Metering Service is running!' }));
 
-// Function to start the Fastify server
+server.register(accountsRoutes, { prefix: '/api/accounts' });
+server.register(usersRoutes, { prefix: '/api/users' });
+server.register(plansRoutes, { prefix: '/api/plans' });
+server.register(assignmentsRoutes, { prefix: '/api/assignments' });
+server.register(usageRoutes, { prefix: '/api/usage' });
+
 const start = async () => {
   try {
     const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;

@@ -27,11 +27,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS plans_predefined_name
 -- API keys are securely stored as cryptographic hashes (SHA-256).
 -------------------
 
-CREATE TABLE IF NOT EXISTS account(
+CREATE TABLE IF NOT EXISTS accounts(
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL,
-  api_key_hash text NOT NULL,
-  plan_id uuid NOT NULL UNIQUE,
+  api_key_hash text NOT NULL UNIQUE,
+  plan_id uuid NOT NULL REFERENCES plans(id),
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS account_usage(
 );
 
 CREATE TABLE IF NOT EXISTS user_usage(
-  user_id uuid IF NOT EXISTS REFERENCES users(id),
+  user_id uuid NOT NULL REFERENCES users(id),
   month date NOT NULL,
   used bigint NOT NULL DEFAULT 0 CHECK (used >=0),
   PRIMARY KEY (user_id, month)
@@ -105,10 +105,10 @@ CREATE INDEX IF NOT EXISTS requests_user_history
 -- 6. SEED DATA (Predefined Default Plans)
 -- Inserts standard global starter and pro plans for accounts and users.
 ------------------------------------------------------------------------
-INSERT INTO plans (scope, name , monthly_allowance, max_pre_request, is_predefined)
-  ('account','Starter',10000,100,true),
-  ('account','Pro',1000000, 1000, true)
-  ('user', 'Basic', 500 , 20 , true)
-  ('user', 'Ppremium' , 5000, 200 , true)
-ON CONFLICT (scop, name) WHERE account_id IS NULL DO NOTHING;
-
+INSERT INTO plans (scope, name, monthly_allowance, max_per_request, is_predefined)
+VALUES 
+    ('account', 'Starter', 10000, 100, true),
+    ('account', 'Pro', 1000000, 1000, true),
+    ('user', 'Basic', 500, 20, true),
+    ('user', 'Premium', 5000, 200, true)
+ON CONFLICT DO NOTHING;
