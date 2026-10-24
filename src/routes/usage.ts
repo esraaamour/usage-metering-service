@@ -1,3 +1,13 @@
+/**
+ * @file routes/usage.ts
+ * @description Usage Routes.
+ * Exposes the authenticated endpoints for the core metering workflow:
+ *   - GET  /api/usage          : current usage, remaining quota and plans (account + each user)
+ *   - GET  /api/usage/history  : paginated history of accepted/rejected requests
+ *   - POST /api/usage/consume  : consume units (delegates to the transactional engine in consume.ts)
+ * All queries are scoped to the calling account, so one client can never see another client's data.
+ */
+
 import { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { pool } from '../db/db.js';
@@ -5,21 +15,26 @@ import { authenticate } from '../db/auth.js';
 import { consume, ConsumeInput } from '../db/consume.js';
 import { HttpError } from '../db/errors.js';
 
+// Safely converts DB values (bigint arrives as string) to a number; falls back to 0 for null/NaN
 const toNum = (val: any): number => Number(val) || 0;
 
 // Resolve the requested month (?month=YYYY-MM) to the stored format YYYY-MM-DD (UTC).
 // Defaults to the current UTC month, computed the same way consume() does.
 async function resolveMonth(q: unknown): Promise<string> {
+  // Validate the optional month query parameter (YYYY-MM with a valid month 01-12)
   const { month } = z
     .object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() })
     .parse(q);
   if (month) return `${month}-01`;
+
+  // No month provided: use the current month according to the database clock (UTC)
   const m = await pool.query(
     `SELECT to_char(date_trunc('month', now() AT TIME ZONE 'utc'), 'YYYY-MM-DD') AS month`,
   );
   return m.rows[0].month;
 }
 
+// Builds the response object for one level (account or user): plan info, limits, usage and remaining
 const level = (name: string, planId: string, allow: any, max: any, used: any) => ({
   planId,
   planName: name,
@@ -35,6 +50,7 @@ export default async function usageRoutes(app: FastifyInstance) {
     const { accountId } = await authenticate(req);
     const month = await resolveMonth(req.query);
 
+    // Account-level: current plan + usage for the month (LEFT JOIN + COALESCE => 0 if no usage yet)
     const acc = await pool.query(
       `SELECT p.id AS plan_id, p.name, p.monthly_allowance, p.max_per_request,
               COALESCE(au.used, 0) AS used
@@ -44,6 +60,8 @@ export default async function usageRoutes(app: FastifyInstance) {
         WHERE a.id = $1`,
       [accountId, month],
     );
+
+    // User-level: same information for every user belonging to this account
     const users = await pool.query(
       `SELECT u.external_id, p.id AS plan_id, p.name, p.monthly_allowance, p.max_per_request,
               COALESCE(uu.used, 0) AS used
@@ -54,6 +72,8 @@ export default async function usageRoutes(app: FastifyInstance) {
         ORDER BY u.external_id`,
       [accountId, month],
     );
+
+    // Assemble the response: users are identified by their external_id (the client's own id)
     const a = acc.rows[0];
     return {
       month,
@@ -68,6 +88,8 @@ export default async function usageRoutes(app: FastifyInstance) {
   // GET /api/usage/history?month=YYYY-MM&userId=...&limit=20&offset=0 : request outcomes, paginated
   app.get('/history', async (req: FastifyRequest) => {
     const { accountId } = await authenticate(req);
+
+    // Validate filters and pagination (limit is capped at 100 to protect the database)
     const q = z
       .object({
         month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(),
@@ -77,6 +99,7 @@ export default async function usageRoutes(app: FastifyInstance) {
       })
       .parse(req.query);
 
+    // Build the WHERE clause dynamically; values always go through parameters ($n) to avoid SQL injection
     const params: any[] = [accountId];
     let where = 'r.account_id = $1';
     if (q.month) {
@@ -88,10 +111,13 @@ export default async function usageRoutes(app: FastifyInstance) {
       where += ` AND u.external_id = $${params.length}`;
     }
 
+    // Total number of matching records (needed by clients to render pagination)
     const total = await pool.query(
       `SELECT count(*) AS n FROM requests r JOIN users u ON u.id = r.user_id WHERE ${where}`,
       params,
     );
+
+    // Fetch the requested page, newest first
     params.push(q.limit, q.offset);
     const rows = await pool.query(
       `SELECT r.request_id, u.external_id, r.units, r.month, r.accepted,
@@ -112,17 +138,20 @@ export default async function usageRoutes(app: FastifyInstance) {
         units: toNum(r.units),
         month: r.month,
         accepted: r.accepted,
+        // Rejection details are included only for rejected requests
         rejection: r.accepted ? null : { level: r.reject_level, rule: r.reject_rule },
         createdAt: r.created_at,
       })),
     };
   });
 
-  // POST /api/usage/consume
+  // POST /api/usage/consume : consume units for a user (idempotent per requestId)
   app.post('/consume', async (req: FastifyRequest, reply) => {
     try {
+      // Identify the calling account from the x-api-key header
       const { accountId } = await authenticate(req);
 
+      // Validate the body: units must be a positive integer
       const { userExternalId, units, requestId } = z
         .object({
           userExternalId: z.string().min(1),
@@ -131,10 +160,12 @@ export default async function usageRoutes(app: FastifyInstance) {
         })
         .parse(req.body);
 
+      // Run the transactional quota check and return the decision (accepted or rejected)
       const input: ConsumeInput = { accountId, userExternalId, units, requestId };
       const result = await consume(input);
       return reply.send(result);
     } catch (err: any) {
+      // Validation failure: respond with a friendly 400 message
       if (err instanceof z.ZodError) {
         return reply.status(400).send({
           statusCode: 400,
@@ -143,6 +174,7 @@ export default async function usageRoutes(app: FastifyInstance) {
           message: 'userExternalId and requestId are required, and units must be a positive whole number',
         });
       }
+      // Known application errors (401, 404, 409...): respond with their status and code
       if (err instanceof HttpError) {
         return reply.status(err.statusCode).send({
           statusCode: err.statusCode,
@@ -151,6 +183,7 @@ export default async function usageRoutes(app: FastifyInstance) {
           message: err.message,
         });
       }
+      // Anything else is unexpected: let the global error handler deal with it
       throw err;
     }
   });
