@@ -1,7 +1,21 @@
+/**
+ * @file consume.ts
+ * @description Quota Consumption Engine.
+ * Implements the core "consume units" operation of the metering service. Each call runs inside a
+ * single PostgreSQL transaction that:
+ *   - verifies the user belongs to the calling account,
+ *   - locks the monthly usage rows (account + user) to prevent race conditions,
+ *   - guarantees idempotency per request_id (replays return the originally stored decision),
+ *   - checks per-request limits and monthly allowances at both account and user levels,
+ *   - updates usage counters only when the request is accepted,
+ *   - persists the final decision for auditing and future replays.
+ */
+
 import type { PoolClient } from 'pg';
 import { pool } from './db.js';
 import { HttpError } from './errors.js';
 
+/** Input payload for a consumption request. */
 export interface ConsumeInput {
   accountId: string;
   userExternalId: string;
@@ -9,6 +23,7 @@ export interface ConsumeInput {
   requestId: string;
 }
 
+/** Snapshot of limits and usage for one level (account or user) at decision time. */
 interface LevelState {
   planId: string;
   monthlyAllowance: number;
@@ -17,6 +32,7 @@ interface LevelState {
   remaining: number; // max(0, allowance - used)
 }
 
+/** Final decision returned to the caller and stored in the requests table. */
 export interface Decision {
   accepted: boolean;
   requestId: string;
@@ -28,6 +44,7 @@ export interface Decision {
   user: LevelState;
 }
 
+/** Result of a consume call; `replayed` is true when an existing decision was returned. */
 export interface ConsumeResult {
   decision: Decision;
   replayed: boolean;
@@ -139,6 +156,7 @@ async function consumeTx(c: PoolClient, i: ConsumeInput): Promise<ConsumeResult>
     [accountId, userId],
   );
   const r = p.rows[0];
+  // Helper: builds a LevelState from raw DB values (numeric columns arrive as strings)
   const level = (planId: string, allow: string, max: string, used: string): LevelState => ({
     planId,
     monthlyAllowance: Number(allow),
@@ -164,6 +182,7 @@ async function consumeTx(c: PoolClient, i: ConsumeInput): Promise<ConsumeResult>
       month,
       units,
     ]);
+    // Mirror the DB update in the in-memory snapshot so the returned decision shows post-consumption values
     for (const s of [account, user]) {
       s.used += units;
       s.remaining = Math.max(0, s.monthlyAllowance - s.used);
